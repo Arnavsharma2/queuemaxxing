@@ -53,6 +53,19 @@ test("delay, priority, and LIFO compose without head-of-line blocking", () => {
   store.close();
 });
 
+test("a queue-level delay applies by default and a message can override it", () => {
+  let now = 2_000;
+  const { store } = storeAt(() => now);
+  store.createQueue("delay-queue", { discipline: "lifo", priority: true, defaultDelayMs: 500 });
+  assert.equal(store.describeQueue("delay-queue").defaultDelayMs, 500);
+  store.enqueue("delay-queue", { payload: "uses-default", priority: 10 });
+  store.enqueue("delay-queue", { payload: "override", priority: 1, delayMs: 0 });
+  assert.equal(store.claim("delay-queue").at(0).payload, "override");
+  now += 500;
+  assert.equal(store.claim("delay-queue").at(0).payload, "uses-default");
+  store.close();
+});
+
 test("delayed messages remain unavailable until their timestamp", () => {
   let now = 5_000;
   const { store } = storeAt(() => now);
@@ -76,6 +89,9 @@ test("unacknowledged messages replay with a new receipt after visibility timeout
   now = 149;
   assert.deepEqual(store.claim("replay"), []);
   now = 150;
+  const expiredView = store.peek("replay").at(0);
+  assert.equal(expiredView.state, "queued");
+  assert.equal(expiredView.receipt, undefined);
   const replay = store.claim("replay").at(0);
   assert.equal(replay.id, first.id);
   assert.notEqual(replay.receipt, first.receipt);

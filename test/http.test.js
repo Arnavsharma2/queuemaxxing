@@ -59,5 +59,5 @@ test("HTTP errors are structured and include request IDs", async () => {
 test("operator console is served", async () => {
   const response = await fetch(`${baseUrl}/`);
   assert.equal(response.status, 200);
-  assert.match(await response.text(), /Queue<span>maxxing/);
+  assert.match(await response.text(), /<h1>Queuemaxxing<\/h1>/);
 });

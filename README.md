@@ -1,42 +1,67 @@
-# Queuemaxxing 💪
+# Queuemaxxing
 
-A dependency-free HTTP queue that lets FIFO/LIFO ordering, priority, and per-message delay work together. Data is stored in its own checksummed, fsynced append-only log—no database and no delegated broker.
+This is a small HTTP queue built for the Queuemaxxing take-home prompt. A queue can be FIFO or LIFO, can optionally sort by priority, and can define a default delivery delay. A message may override that delay.
+
+The server owns its storage. It does not use Redis, SQLite, another queue, or any external service. Changes are appended to a checksummed log and synced to disk before the API reports success.
 
 ## Run it
 
-Requires Node.js 22 or newer.
+Node.js 22 or newer is required. There are no npm dependencies.
 
 ```bash
 npm start
 ```
 
-Open [http://localhost:8080](http://localhost:8080) for the included producer/consumer console. Queue data is written to `./data`; override it with `DATA_DIR`.
+The API and the example web client will be available at [http://localhost:8080](http://localhost:8080). Data is stored in `./data` by default. Set `DATA_DIR` to use a different directory.
 
-Or run in Docker with a persistent named volume:
+Docker works too:
 
 ```bash
 docker compose up --build
 ```
 
-## Quick tour
+The Compose file mounts a named volume at `/data`, so restarting the container does not remove queued messages.
 
-Create a delayed priority LIFO queue:
+## Queue behavior
+
+Queue configuration is set when the queue is created:
+
+| `discipline` | `priority` | Result |
+| --- | --- | --- |
+| `fifo` | `false` | FIFO |
+| `lifo` | `false` | LIFO |
+| `fifo` | `true` | Priority first, FIFO for ties |
+| `lifo` | `true` | Priority first, LIFO for ties |
+
+`defaultDelayMs` is set on the queue. An optional message-level `delayMs` overrides it. A delayed message is ignored until its availability time, so a delayed high-priority message does not block ready messages.
+
+## API example
+
+Create a priority LIFO queue:
 
 ```bash
 curl -sS http://localhost:8080/v1/queues \
   -H 'content-type: application/json' \
-  -d '{"name":"jobs","discipline":"lifo","priority":true}'
+  -d '{"name":"jobs","discipline":"lifo","priority":true,"defaultDelayMs":2000}'
+```
 
+Publish a high-priority message. It will use the queue's two-second delay:
+
+```bash
 curl -sS http://localhost:8080/v1/queues/jobs/messages \
   -H 'content-type: application/json' \
-  -d '{"payload":{"task":"render"},"priority":50,"delayMs":2000,"idempotencyKey":"render-42"}'
+  -d '{"payload":{"task":"render"},"priority":50}'
+```
 
+Claim one available message:
+
+```bash
 curl -sS http://localhost:8080/v1/queues/jobs/claims \
   -H 'content-type: application/json' \
   -d '{"limit":1,"visibilityTimeoutMs":30000}'
 ```
 
-Use the returned message ID and receipt to acknowledge it:
+Claims return a message ID and receipt. A successful worker acknowledges the message with both values:
 
 ```bash
 curl -sS http://localhost:8080/v1/queues/jobs/messages/MESSAGE_ID/ack \
@@ -44,49 +69,42 @@ curl -sS http://localhost:8080/v1/queues/jobs/messages/MESSAGE_ID/ack \
   -d '{"receipt":"RECEIPT"}'
 ```
 
-The executable example creates a priority FIFO queue, publishes three jobs, claims in priority order, and acknowledges them:
+The full API is documented in [docs/API.md](docs/API.md) and [openapi.yaml](openapi.yaml).
+
+## Example client
+
+The page served at `/` is a client of the public HTTP API. It can create queues, publish immediate or delayed messages, claim work, acknowledge it, and release it for retry. There is also a command-line example:
 
 ```bash
 npm run demo
 ```
 
-## Semantics
+## Delivery and persistence
 
-- **Combinations:** FIFO, LIFO, priority FIFO, priority LIFO, and delay on any of them.
-- **Priority:** larger signed integer first; FIFO/LIFO resolves ties.
-- **Delay:** a message is invisible until `availableAt` and does not block ready work.
-- **Concurrency:** many HTTP producers/consumers can operate concurrently; claim selection and durable mutation are one synchronous critical section.
-- **Delivery:** at least once via receipt-based visibility leases. Unacked messages replay automatically.
-- **Durability:** mutation responses follow append + `fsync`; startup verifies every complete record and truncates a torn tail.
-- **Scope:** one server process owns one data directory. Do not mount a single directory into multiple instances.
+Claims use a visibility timeout. If a worker disappears without acknowledging its message, the message becomes eligible for another claim. This gives at-least-once delivery. The next claim gets a new receipt, so a slow worker cannot acknowledge a newer delivery by accident.
 
-See the [API reference](docs/API.md), the [OpenAPI 3.1 contract](openapi.yaml), and [architecture, replay, Pub/Sub, roadmap, and competitive rationale](docs/ARCHITECTURE.md).
+Each state change is written as a checksummed event. The server appends the whole record, calls `fsync`, and only then updates the in-memory view and returns success. Startup rebuilds the view by replaying the log. An incomplete final write is truncated; checksum failure in a complete record stops startup.
 
-## Verify it
+This design supports concurrent HTTP producers and consumers in one server process. The synchronous commit section serializes competing claims. It is not a clustered queue, and two server processes must not share the same data directory.
+
+## Tests
 
 ```bash
 npm test
 npm run test:coverage
 ```
 
-Tests cover FIFO/LIFO tie-breaking, priority, delay, expiry replay and stale receipts, nacks and lease extension, idempotency, restart recovery, torn writes, corruption detection, concurrent claim uniqueness, the HTTP lifecycle, error shape, and the web console.
+The tests cover all four ordering modes, delayed availability, visibility-timeout replay, stale receipts, explicit retry, lease extension, idempotent publishing, restart recovery, torn writes, corruption detection, concurrent claims, and the HTTP client flow.
 
-## Repository map
+## Design questions
 
-```text
-src/queue-store.js  durable log + queue state machine
-src/app.js          HTTP routing and static console server
-src/server.js       process lifecycle
-public/             zero-build producer/consumer UI
-bin/demo.js         API usage example
-test/               state-machine and HTTP tests
-docs/               API and design discussion
-```
+The requested answers about message replay, a Pub/Sub version, additional features, and comparison with SQS, RabbitMQ, and Pulsar are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Limitations
+## Known limits
 
-This submission makes durability and semantics explicit, but it is not a distributed broker. The current log needs segmentation/compaction for long-lived high-volume use, `fsync` per mutation caps throughput, and the single process is a single availability domain. The next production milestones are in `docs/ARCHITECTURE.md`.
+- One process and one disk are a single failure domain.
+- The log is not compacted, so acknowledged messages remain in its history.
+- Calling `fsync` for every mutation favors durability over throughput.
+- Authentication, quotas, metrics, and dead-letter queues are not implemented.
 
-## License
-
-MIT
+Those are deliberate limits for this version rather than claims of production parity with an established broker.

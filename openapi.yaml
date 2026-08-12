@@ -172,6 +172,7 @@ components:
         name: { type: string, pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$" }
         discipline: { type: string, enum: [fifo, lifo], default: fifo }
         priority: { type: boolean, default: false }
+        defaultDelayMs: { type: integer, minimum: 0, maximum: 1209600000, default: 0 }
         defaultVisibilityTimeoutMs: { type: integer, minimum: 1, maximum: 43200000, default: 30000 }
     Queue:
       allOf:
@@ -194,7 +195,7 @@ components:
       properties:
         payload: {}
         priority: { type: integer, minimum: -1000000, maximum: 1000000, default: 0 }
-        delayMs: { type: integer, minimum: 0, maximum: 1209600000, default: 0 }
+        delayMs: { type: integer, minimum: 0, maximum: 1209600000 }
         idempotencyKey: { type: string, minLength: 1, maxLength: 128 }
     Receipt:
       type: object

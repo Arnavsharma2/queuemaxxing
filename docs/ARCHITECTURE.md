@@ -1,87 +1,81 @@
-# Architecture and design notes
+# Design notes
 
-## Storage and durability
+## Storage
 
-Queuemaxxing owns its storage. It does not call a database, broker, or managed queue. Every mutation becomes an immutable event in `events.ndjson`:
+I used an append-only event log because the prompt rules out handing storage to a database or another queue. The on-disk file is `events.ndjson` inside `DATA_DIR`.
 
-1. Serialize the complete event to JSON.
-2. Wrap it with a SHA-256 checksum.
-3. Append it to the open log file.
-4. Call `fsync` before exposing the change in memory or returning success.
-5. Apply the event to the in-memory materialized view.
+For each mutation the server:
 
-On startup, events are checksummed and replayed in order. An incomplete final record—possible if power is lost during a write—is truncated. A corrupt complete record fails startup loudly rather than silently losing or inventing state.
+1. serializes the event;
+2. adds a SHA-256 checksum;
+3. writes the complete record to the open log;
+4. calls `fsync`;
+5. applies the event to the in-memory queue state.
 
-This is intentionally a single-node design. The Node process is the serialization boundary: synchronous commit sections mean interleaved HTTP requests cannot claim the same message. Multiple consumers and producers may use one server concurrently, but two server processes must not share a data directory. Production evolution would add an OS file lock first, then segment logs and replicate them with Raft.
+The order matters. A client does not receive a success response for a message that only exists in memory.
 
-### Tradeoffs
+Startup verifies and applies each event in order. A crash can leave the last record incomplete, so recovery truncates an incomplete tail. A complete record with a bad checksum is treated differently: startup fails because silently skipping corruption would make the queue state untrustworthy.
 
-- `fsync` per operation favors durability over peak throughput. Batch commit/group fsync would improve throughput.
-- The event log retains acknowledged messages and idempotency keys, creating a complete audit trail but growing without bound. Snapshotting and compaction are the first operational follow-up.
-- The in-memory index makes claims fast, while recovery time and memory scale with historical and live message counts respectively.
-- JSON lines make the submission inspectable. A production format would use length-prefixed binary records with versioning.
+Acknowledged messages remain in the history even though they are removed from the live in-memory view. This keeps recovery simple, but the log will grow. I would add segmented logs, snapshots, and compaction before using this for a long-running high-volume workload.
 
-## Ordering semantics
+## Concurrency
 
-Only currently available messages participate in ordering. Delayed messages do not block ready messages.
+One Node process owns the log. HTTP requests may arrive concurrently, but the queue mutation methods do not yield: selection, append, `fsync`, and in-memory application form one critical section. Two claims therefore cannot lease the same message.
 
-For a queue with priority disabled, sequence number is sorted ascending for FIFO or descending for LIFO. With priority enabled, higher integer priority sorts first; sequence is the FIFO/LIFO tie-breaker. This precisely supports:
+This is concurrency within one server, not horizontal scaling. Starting two copies against the same directory is unsupported. A production single-node version should enforce that with a process lock. A distributed version would need replication and leader election rather than shared-file access.
 
-- FIFO
-- LIFO
-- priority FIFO
-- priority LIFO
-- delayed versions of all four
+## Ordering
 
-Strict global order is not promised once multiple consumers have claimed messages: processing and acknowledgement may complete in any order.
+Every message receives a monotonically increasing sequence number.
 
-## Replay and delivery guarantee
+- Without priority, FIFO sorts sequence ascending and LIFO sorts it descending.
+- With priority, the larger priority value wins. Sequence order is only used to break equal-priority ties.
+- A queue's `defaultDelayMs` applies unless the message supplies its own `delayMs`. Delayed messages do not enter the candidate set until `availableAt`.
 
-Delivery is **at least once**:
+Once several messages have been claimed by different workers, their completion order is outside the queue's control. The ordering guarantee applies to claims, not to completion of the work.
 
-- `claim` atomically leases a message and returns an opaque receipt.
-- `ack` deletes the live message only when the current receipt matches.
-- A worker may `touch` to extend long-running work, or `nack` to retry now/later.
-- If a worker crashes, its visibility timeout expires. The next claim durably releases and re-leases the message with the same message ID, a new receipt, and an incremented attempt counter.
-- A stale worker cannot acknowledge a newer delivery because its old receipt is rejected.
-- Publisher retries can use an idempotency key. The mapping is durable, so the same queue/key never produces two messages, including after acknowledgement or restart.
+## How are replayed messages handled?
 
-Exactly-once side effects are impossible for a general HTTP queue to guarantee: a consumer can perform its side effect and crash before `ack`. Consumers should deduplicate on message ID or make their side effect idempotent. A transactionally coupled outbox/inbox is the robust option when the consumer controls a database.
+The queue provides at-least-once delivery.
 
-## Refactoring into Pub/Sub
+A claim is a lease with an opaque receipt and a visibility deadline. The worker can acknowledge it, release it for retry, or extend it. If the deadline expires, a later claim can lease the same message again. The message ID stays the same, the attempt count increases, and the receipt changes. An old receipt cannot acknowledge the new lease.
 
-The storage log already resembles a topic. I would keep the append-only record as the source of truth and replace destructive queue acknowledgement with independent subscription cursors:
+Publisher retries are a separate problem. A producer can send an `idempotencyKey`; the queue stores that key with the original message and returns the existing message ID instead of enqueuing a second copy.
 
-1. `POST /topics/:topic/messages` appends once to a partition.
-2. Each subscription stores its filter, delivery policy, and committed offset per partition.
-3. Claims lease `(subscription, partition, offset)` instead of globally leasing the message.
-4. Acknowledgements advance a subscription's contiguous committed frontier; sparse acks remain in a small bitmap/set.
-5. Retention becomes time/size based and a segment is collectible only after every durable subscription passes it (or its retention deadline does).
-6. Consumer groups share one subscription and divide partitions; fan-out consumers use different subscriptions.
+The queue cannot promise exactly-once side effects. A worker can finish its external work and crash before sending `ack`. Consumers should make their work idempotent or deduplicate using the message ID. If the consumer owns a database, an inbox/outbox pattern is the safer approach.
 
-Priority complicates a replicated log because consuming out of offset order prevents simple compaction. I would either make priority a subscription policy backed by per-priority indexes, or expose priority lanes as separate topics and let consumers choose weighted fairness.
+## How would this become Pub/Sub?
 
-## More time
+The append-only log can become a topic log, but acknowledgement can no longer remove a message globally. Each subscription needs its own position.
 
-In order of likely value:
+I would make these changes:
 
-1. Dead-letter policies (`maxAttempts`, DLQ target) and redrive.
-2. Log segments, snapshots, online compaction, disk quotas, and retention controls.
-3. Group commit and an indexed timing wheel/heap for high-throughput delays.
-4. Authentication, per-queue authorization, TLS, encryption at rest, and audit events.
-5. Prometheus metrics, OpenTelemetry traces, structured logs, admin endpoints, and disk-pressure health checks.
-6. Long polling, server-sent notifications, batch ack/nack, scheduled recurrence, and queue pause/purge.
-7. Replication and leader election, followed by partitioning for horizontal scale.
-8. Property-based/state-machine tests, crash-fault injection, benchmarks, and compatibility/version migration tests.
+1. Append each published record once to a topic partition.
+2. Store a committed offset per subscription and partition.
+3. Lease deliveries using `(subscription, partition, offset)`.
+4. Track out-of-order acknowledgements until the contiguous committed offset can advance.
+5. Let consumer groups share a subscription; separate subscriptions provide fan-out.
+6. Delete old log segments only after retention expires or all durable subscriptions have advanced past them.
 
-## Why choose it?
+Priority makes offsets less convenient because delivery no longer follows log order. I would probably use separate priority lanes and a weighted consumer policy instead of pretending one offset can represent an arbitrary priority order.
 
-Choose Queuemaxxing when the useful product is a small, self-contained, embeddable durable queue—not an infrastructure program:
+## What would I add with more time?
 
-- One process, one mounted directory, zero runtime dependencies.
-- One understandable HTTP/JSON API and a built-in operator console.
-- FIFO/LIFO, priorities, and per-message delays compose rather than living in separate product modes.
-- The log is human-inspectable and the durability mechanism is small enough to audit.
-- Local/on-prem/edge deployments keep message data under the user's control.
+My first additions would be operational rather than more queue modes:
 
-Do **not** choose it today for multi-region availability, massive fan-out, protocol ecosystem, enterprise operations, or proven high throughput. SQS, RabbitMQ, and Pulsar are mature incumbents with replication, monitoring, security, SDKs, support, and years of failure testing. The honest wedge here is simplicity and composable scheduling on one node; the architecture section above is a roadmap, not a claim of parity.
+1. Dead-letter queues and a configurable maximum attempt count.
+2. Segment rotation, snapshots, log compaction, disk limits, and retention settings.
+3. Long polling and batch acknowledgement to reduce HTTP overhead.
+4. Authentication, per-queue authorization, TLS, and encryption at rest.
+5. Prometheus metrics, tracing, disk-pressure health checks, and better structured logs.
+6. A timing heap or timing wheel instead of scanning live messages for delays.
+7. Crash injection and property-based state-machine tests.
+8. Replication and partitioning, if the expected workload justified the extra complexity.
+
+## Why use this instead of SQS, RabbitMQ, or Pulsar?
+
+The useful difference is its small deployment and the way the scheduling options compose. It is one process with one mounted directory, an HTTP API, and no service dependencies. It is easy to run locally or on an isolated machine, and the storage code is short enough to inspect.
+
+That is a narrow reason, not a claim that this is a better general-purpose broker. SQS is a better fit when a managed AWS service and high availability matter. RabbitMQ has a much broader protocol, routing, and plugin ecosystem. Pulsar is designed for replicated, partitioned streaming and fan-out at a scale this project does not attempt.
+
+I would choose this queue for a small self-hosted workload that needs priority plus FIFO/LIFO plus delay and values operational simplicity. I would choose an incumbent when I need clustering, multi-region durability, mature monitoring, support, or a proven throughput envelope.

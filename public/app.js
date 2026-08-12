@@ -52,11 +52,12 @@ async function refresh() {
     [queue.stats.available, "Available"],
     [queue.stats.delayed, "Delayed"],
     [queue.stats.inFlight, "In flight"],
+    [queue.defaultDelayMs, "Default delay (ms)"],
     [`${queue.priority ? "Priority + " : ""}${queue.discipline.toUpperCase()}`, "Discipline"],
   ];
   elements["queue-meta"].innerHTML = labels.map(([value, label]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
   if (listing.messages.length === 0) {
-    elements.messages.innerHTML = '<p class="empty">No messages. This queue is resting.</p>';
+    elements.messages.innerHTML = '<p class="empty">No messages in this queue.</p>';
     return;
   }
   elements.messages.innerHTML = listing.messages.map((message) => `
@@ -80,8 +81,9 @@ elements["create-form"].addEventListener("submit", async (event) => {
       name: elements["queue-name"].value,
       discipline: elements.discipline.value,
       priority: elements["priority-enabled"].checked,
+      defaultDelayMs: Number(elements["default-delay"].value),
     }) });
-    toast("Queue created. Time to feed it.");
+    toast("Queue created.");
     await loadQueues();
   } catch (error) { toast(error.message, true); }
 });
@@ -94,10 +96,10 @@ elements["publish-form"].addEventListener("submit", async (event) => {
     await api(`/v1/queues/${encodeURIComponent(name)}/messages`, { method: "POST", body: JSON.stringify({
       payload: JSON.parse(elements.payload.value),
       priority: Number(elements["message-priority"].value),
-      delayMs: Number(elements.delay.value),
+      ...(elements.delay.value === "" ? {} : { delayMs: Number(elements.delay.value) }),
       ...(elements.dedupe.value ? { idempotencyKey: elements.dedupe.value } : {}),
     }) });
-    toast("Message enqueued durably.");
+    toast("Message published.");
     elements["consume-queue"].value = name;
     await refresh();
   } catch (error) { toast(error.message, true); }
@@ -107,7 +109,7 @@ elements.claim.addEventListener("click", async () => {
   try {
     const name = elements["consume-queue"].value;
     const result = await api(`/v1/queues/${encodeURIComponent(name)}/claims`, { method: "POST", body: JSON.stringify({ limit: 1 }) });
-    toast(result.messages.length ? "Claimed one message." : "Nothing is available yet.");
+    toast(result.messages.length ? "Message claimed." : "No message is currently available.");
     await refresh();
   } catch (error) { toast(error.message, true); }
 });
@@ -122,7 +124,7 @@ elements.messages.addEventListener("click", async (event) => {
       method: "POST",
       body: JSON.stringify({ receipt: button.dataset.receipt, ...(action === "nack" ? { delayMs: 1000 } : {}) }),
     });
-    toast(action === "ack" ? "Work acknowledged." : "Message scheduled for retry.");
+    toast(action === "ack" ? "Message acknowledged." : "Message scheduled for retry.");
     await refresh();
   } catch (error) { toast(error.message, true); }
 });

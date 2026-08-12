@@ -11,11 +11,12 @@ All request and response bodies are JSON. Errors have the shape `{"error":{"code
   "name": "orders",
   "discipline": "fifo",
   "priority": true,
+  "defaultDelayMs": 0,
   "defaultVisibilityTimeoutMs": 30000
 }
 ```
 
-`discipline` is `fifo` or `lifo`. `priority` defaults to `false`.
+`discipline` is `fifo` or `lifo`. `priority` defaults to `false`. `defaultDelayMs` defaults to zero and applies to messages that do not provide their own `delayMs`.
 
 ### `GET /v1/queues`
 
@@ -38,7 +39,7 @@ Describes one queue.
 }
 ```
 
-Payload may be any JSON value up to 256 KiB. Higher integer priority is processed first when the queue enables priority. Delay is between zero and 14 days. An idempotency key is scoped to a queue and retained permanently in this version.
+Payload may be any JSON value up to 256 KiB. Higher integer priority is processed first when the queue enables priority. Delay is between zero and 14 days and overrides the queue's default delay. An idempotency key is scoped to a queue and retained permanently in this version.
 
 ### `GET /v1/queues/:name/messages?limit=20`
 

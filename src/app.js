@@ -61,7 +61,7 @@ function serveStatic(request, response, pathname) {
   response.writeHead(200, {
     "content-type": contentTypes[extension] ?? "application/octet-stream",
     "content-length": data.length,
-    "cache-control": extension === ".html" ? "no-cache" : "public, max-age=300",
+    "cache-control": "no-cache",
   });
   if (request.method === "HEAD") response.end();
   else response.end(data);

@@ -12,46 +12,47 @@
     <main>
       <header>
         <div>
-          <p class="eyebrow">Durable queue console</p>
-          <h1>Queue<span>maxxing</span> <b>💪</b></h1>
-          <p class="lede">Mix FIFO or LIFO, priority, and delay—then watch the queue flex.</p>
+          <p class="eyebrow">Queue admin</p>
+          <h1>Queuemaxxing</h1>
+          <p class="lede">A small client for creating queues, publishing messages, and testing claims.</p>
         </div>
         <div class="status"><i></i><span id="health">Connecting</span></div>
       </header>
 
       <section class="grid">
         <article class="card creator">
-          <div class="card-head"><span>01</span><h2>Build a queue</h2></div>
+          <div class="card-head"><span>1</span><h2>Create a queue</h2></div>
           <form id="create-form">
             <label>Queue name<input id="queue-name" value="workouts" required pattern="[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}"></label>
             <div class="row">
               <label>Order<select id="discipline"><option value="fifo">FIFO</option><option value="lifo">LIFO</option></select></label>
               <label class="check"><input id="priority-enabled" type="checkbox" checked><span>Use priority</span></label>
             </div>
-            <button type="submit">Create queue <span>→</span></button>
+            <label>Default delay (ms)<input id="default-delay" type="number" min="0" value="0"></label>
+            <button type="submit">Create <span>→</span></button>
           </form>
         </article>
 
         <article class="card publisher">
-          <div class="card-head"><span>02</span><h2>Push a message</h2></div>
+          <div class="card-head"><span>2</span><h2>Publish a message</h2></div>
           <form id="publish-form">
             <label>Target queue<select id="publish-queue"></select></label>
             <label>JSON payload<textarea id="payload" rows="4">{"task":"deadlift","reps":5}</textarea></label>
             <div class="row triple">
               <label>Priority<input id="message-priority" type="number" value="10"></label>
-              <label>Delay (ms)<input id="delay" type="number" min="0" value="0"></label>
+              <label>Delay override (ms)<input id="delay" type="number" min="0" placeholder="queue default"></label>
               <label>Dedupe key<input id="dedupe" placeholder="optional"></label>
             </div>
-            <button type="submit">Enqueue <span>＋</span></button>
+            <button type="submit">Publish <span>＋</span></button>
           </form>
         </article>
       </section>
 
       <section class="card workbench">
         <div class="workbench-top">
-          <div class="card-head"><span>03</span><h2>Consume the work</h2></div>
+          <div class="card-head"><span>3</span><h2>Inspect and claim</h2></div>
           <div class="controls">
-            <select id="consume-queue"></select>
+            <select id="consume-queue" aria-label="Consume queue"></select>
             <button id="refresh" class="secondary">Refresh</button>
             <button id="claim">Claim next</button>
           </div>

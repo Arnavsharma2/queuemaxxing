@@ -84,11 +84,17 @@ export class QueueStore {
       "defaultVisibilityTimeoutMs",
       { min: 1, max: MAX_VISIBILITY_TIMEOUT_MS },
     );
+    const defaultDelayMs = asInteger(
+      options.defaultDelayMs ?? 0,
+      "defaultDelayMs",
+      { min: 0, max: MAX_DELAY_MS },
+    );
 
     const event = this.#event("queue.created", {
       name,
       discipline,
       priority,
+      defaultDelayMs,
       defaultVisibilityTimeoutMs,
       createdAt: this.clock(),
     });
@@ -107,13 +113,14 @@ export class QueueStore {
       name: queue.name,
       discipline: queue.discipline,
       priority: queue.priority,
+      defaultDelayMs: queue.defaultDelayMs,
       defaultVisibilityTimeoutMs: queue.defaultVisibilityTimeoutMs,
       createdAt: queue.createdAt,
       stats: this.#stats(queue, now),
     };
   }
 
-  enqueue(name, { payload, priority = 0, delayMs = 0, idempotencyKey } = {}) {
+  enqueue(name, { payload, priority = 0, delayMs, idempotencyKey } = {}) {
     const queue = this.#queue(name);
     if (payload === undefined) throw badRequest("PAYLOAD_REQUIRED", "payload is required");
     const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
@@ -121,7 +128,7 @@ export class QueueStore {
       throw badRequest("PAYLOAD_TOO_LARGE", "payload may not exceed 256 KiB");
     }
     priority = asInteger(priority, "priority", { min: -1_000_000, max: 1_000_000 });
-    delayMs = asInteger(delayMs, "delayMs", { min: 0, max: MAX_DELAY_MS });
+    delayMs = asInteger(delayMs ?? queue.defaultDelayMs, "delayMs", { min: 0, max: MAX_DELAY_MS });
     if (idempotencyKey !== undefined && (typeof idempotencyKey !== "string" || idempotencyKey.length < 1 || idempotencyKey.length > 128)) {
       throw badRequest("INVALID_IDEMPOTENCY_KEY", "idempotencyKey must be a string between 1 and 128 characters");
     }
@@ -238,7 +245,19 @@ export class QueueStore {
     return [...queue.messages.values()]
       .sort((a, b) => a.sequence - b.sequence)
       .slice(0, limit)
-      .map((message) => ({ ...publicMessage(message), state: message.state, delayed: message.availableAt > now }));
+      .map((message) => {
+        const view = publicMessage(message);
+        const leaseExpired = message.state === "leased" && message.leaseExpiresAt <= now;
+        if (leaseExpired) {
+          delete view.receipt;
+          delete view.leaseExpiresAt;
+        }
+        return {
+          ...view,
+          state: leaseExpired ? "queued" : message.state,
+          delayed: message.availableAt > now,
+        };
+      });
   }
 
   #event(type, data) {
@@ -247,8 +266,13 @@ export class QueueStore {
 
   #commit(events) {
     if (this.fd === undefined) throw new Error("QueueStore is not open");
-    const data = events.map(encodeRecord).join("");
-    fs.writeSync(this.fd, data, null, "utf8");
+    const data = Buffer.from(events.map(encodeRecord).join(""), "utf8");
+    let offset = 0;
+    while (offset < data.length) {
+      const written = fs.writeSync(this.fd, data, offset, data.length - offset);
+      if (written === 0) throw new Error("Unable to append to the event log");
+      offset += written;
+    }
     fs.fsyncSync(this.fd);
     for (const event of events) this.#apply(event);
   }
@@ -262,6 +286,7 @@ export class QueueStore {
             name: event.name,
             discipline: event.discipline,
             priority: event.priority,
+            defaultDelayMs: event.defaultDelayMs ?? 0,
             defaultVisibilityTimeoutMs: event.defaultVisibilityTimeoutMs,
             createdAt: event.createdAt,
             messages: new Map(),
