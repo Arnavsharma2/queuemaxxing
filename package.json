@@ -1,0 +1,18 @@
+{
+  "name": "queuemaxxing",
+  "version": "1.0.0",
+  "description": "A durable Frankenstein queue with FIFO/LIFO, priority, and delay semantics.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "demo": "node bin/demo.js",
+    "test": "node --test",
+    "test:coverage": "node --test --experimental-test-coverage"
+  },
+  "license": "MIT"
+}

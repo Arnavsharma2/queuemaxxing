@@ -1,0 +1,210 @@
+openapi: 3.1.0
+info:
+  title: Queuemaxxing API
+  version: 1.0.0
+  description: Durable FIFO/LIFO queue with optional priority and per-message delay.
+servers:
+  - url: http://localhost:8080
+paths:
+  /healthz:
+    get:
+      summary: Check process health
+      responses:
+        "200":
+          description: Healthy
+  /v1/queues:
+    get:
+      summary: List queues
+      responses:
+        "200":
+          description: Queue list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [queues]
+                properties:
+                  queues:
+                    type: array
+                    items: { $ref: "#/components/schemas/Queue" }
+    post:
+      summary: Create a queue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateQueue" }
+      responses:
+        "201":
+          description: Queue created
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/queues/{name}:
+    parameters:
+      - $ref: "#/components/parameters/QueueName"
+    get:
+      summary: Describe a queue
+      responses:
+        "200":
+          description: Queue description
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/queues/{name}/messages:
+    parameters:
+      - $ref: "#/components/parameters/QueueName"
+    get:
+      summary: Administratively peek live messages
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: Messages without changing their state
+    post:
+      summary: Enqueue a message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PublishMessage" }
+      responses:
+        "201":
+          description: Message durably enqueued
+        "200":
+          description: Existing idempotent result
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /v1/queues/{name}/claims:
+    parameters:
+      - $ref: "#/components/parameters/QueueName"
+    post:
+      summary: Claim available messages
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit: { type: integer, minimum: 1, maximum: 100, default: 1 }
+                visibilityTimeoutMs: { type: integer, minimum: 1, maximum: 43200000 }
+      responses:
+        "200":
+          description: Claimed messages, possibly empty
+  /v1/queues/{name}/messages/{id}/ack:
+    parameters:
+      - $ref: "#/components/parameters/QueueName"
+      - $ref: "#/components/parameters/MessageId"
+    post:
+      summary: Acknowledge successful processing
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Receipt" }
+      responses:
+        "200": { description: Acknowledged }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/queues/{name}/messages/{id}/nack:
+    parameters:
+      - $ref: "#/components/parameters/QueueName"
+      - $ref: "#/components/parameters/MessageId"
+    post:
+      summary: Release a claim for retry
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Receipt"
+                - type: object
+                  properties:
+                    delayMs: { type: integer, minimum: 0, maximum: 1209600000, default: 0 }
+      responses:
+        "200": { description: Released }
+        "409": { $ref: "#/components/responses/Error" }
+  /v1/queues/{name}/messages/{id}/touch:
+    parameters:
+      - $ref: "#/components/parameters/QueueName"
+      - $ref: "#/components/parameters/MessageId"
+    post:
+      summary: Extend a claim lease
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Receipt"
+                - type: object
+                  properties:
+                    visibilityTimeoutMs: { type: integer, minimum: 1, maximum: 43200000 }
+      responses:
+        "200": { description: Lease extended }
+        "409": { $ref: "#/components/responses/Error" }
+components:
+  parameters:
+    QueueName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$" }
+    MessageId:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+  responses:
+    Error:
+      description: Structured error
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: { $ref: "#/components/schemas/Error" }
+  schemas:
+    CreateQueue:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$" }
+        discipline: { type: string, enum: [fifo, lifo], default: fifo }
+        priority: { type: boolean, default: false }
+        defaultVisibilityTimeoutMs: { type: integer, minimum: 1, maximum: 43200000, default: 30000 }
+    Queue:
+      allOf:
+        - $ref: "#/components/schemas/CreateQueue"
+        - type: object
+          required: [createdAt, stats]
+          properties:
+            createdAt: { type: integer }
+            stats:
+              type: object
+              required: [total, available, delayed, inFlight]
+              properties:
+                total: { type: integer }
+                available: { type: integer }
+                delayed: { type: integer }
+                inFlight: { type: integer }
+    PublishMessage:
+      type: object
+      required: [payload]
+      properties:
+        payload: {}
+        priority: { type: integer, minimum: -1000000, maximum: 1000000, default: 0 }
+        delayMs: { type: integer, minimum: 0, maximum: 1209600000, default: 0 }
+        idempotencyKey: { type: string, minLength: 1, maxLength: 128 }
+    Receipt:
+      type: object
+      required: [receipt]
+      properties:
+        receipt: { type: string, format: uuid }
+    Error:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code: { type: string }
+        message: { type: string }
+        requestId: { type: string }
