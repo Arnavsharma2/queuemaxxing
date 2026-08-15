@@ -56,6 +56,17 @@ test("HTTP errors are structured and include request IDs", async () => {
   assert.equal(typeof result.body.error.requestId, "string");
 });
 
+test("HTTP endpoints reject non-object JSON bodies as bad requests", async () => {
+  const response = await fetch(`${baseUrl}/v1/queues`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "null",
+  });
+  const body = await response.json();
+  assert.equal(response.status, 400);
+  assert.equal(body.error.code, "INVALID_BODY");
+});
+
 test("operator console is served", async () => {
   const response = await fetch(`${baseUrl}/`);
   assert.equal(response.status, 200);

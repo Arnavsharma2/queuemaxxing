@@ -29,11 +29,16 @@ async function readJson(request) {
     chunks.push(chunk);
   }
   if (length === 0) return {};
+  let body;
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    body = JSON.parse(Buffer.concat(chunks).toString("utf8"));
   } catch {
     throw new QueueError(400, "INVALID_JSON", "Request body must be valid JSON");
   }
+  if (body === null || Array.isArray(body) || typeof body !== "object") {
+    throw new QueueError(400, "INVALID_BODY", "Request body must be a JSON object");
+  }
+  return body;
 }
 
 function decode(value) {

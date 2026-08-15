@@ -85,7 +85,7 @@ Claims use a visibility timeout. If a worker disappears without acknowledging it
 
 Each state change is written as a checksummed event. The server appends the whole record, calls `fsync`, and only then updates the in-memory view and returns success. Startup rebuilds the view by replaying the log. An incomplete final write is truncated; checksum failure in a complete record stops startup.
 
-This design supports concurrent HTTP producers and consumers in one server process. The synchronous commit section serializes competing claims. It is not a clustered queue, and two server processes must not share the same data directory.
+This design supports concurrent HTTP producers and consumers in one server process. The synchronous commit section serializes competing claims. It is not a clustered queue; an exclusive process lock prevents two server processes from accidentally sharing the same data directory, and stale locks are reclaimed after a process crash.
 
 ## Tests
 

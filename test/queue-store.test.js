@@ -31,13 +31,16 @@ test("FIFO and LIFO queues resolve equal-priority messages in configured order",
 });
 
 test("priority is primary and FIFO/LIFO is the tie breaker", () => {
-  const { store } = storeAt(() => 1_000);
-  store.createQueue("mixed", { discipline: "lifo", priority: true });
-  store.enqueue("mixed", { payload: "low", priority: 1 });
-  store.enqueue("mixed", { payload: "high-old", priority: 9 });
-  store.enqueue("mixed", { payload: "high-new", priority: 9 });
-  assert.deepEqual(store.claim("mixed", { limit: 3 }).map((message) => message.payload), ["high-new", "high-old", "low"]);
-  store.close();
+  for (const discipline of ["fifo", "lifo"]) {
+    const { store } = storeAt(() => 1_000);
+    store.createQueue(`mixed-${discipline}`, { discipline, priority: true });
+    store.enqueue(`mixed-${discipline}`, { payload: "low", priority: 1 });
+    store.enqueue(`mixed-${discipline}`, { payload: "high-old", priority: 9 });
+    store.enqueue(`mixed-${discipline}`, { payload: "high-new", priority: 9 });
+    const expected = discipline === "fifo" ? ["high-old", "high-new", "low"] : ["high-new", "high-old", "low"];
+    assert.deepEqual(store.claim(`mixed-${discipline}`, { limit: 3 }).map((message) => message.payload), expected);
+    store.close();
+  }
 });
 
 test("delay, priority, and LIFO compose without head-of-line blocking", () => {
@@ -117,6 +120,35 @@ test("durable log restores queues, delayed data, claims, and idempotency", () =>
   now += 50;
   assert.equal(recovered.claim("durable").at(0).payload, "keep-me");
   recovered.close();
+});
+
+test("only one store process can own a data directory at a time", () => {
+  const { directory, store } = storeAt();
+  store.createQueue("exclusive");
+  assert.throws(
+    () => new QueueStore({ dataDir: directory }).open(),
+    /already in use by process/,
+  );
+  store.close();
+
+  const reopened = new QueueStore({ dataDir: directory }).open();
+  assert.equal(reopened.describeQueue("exclusive").name, "exclusive");
+  reopened.close();
+});
+
+test("a stale process lock is reclaimed during restart", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queuemaxxing-"));
+  directories.push(directory);
+  fs.writeFileSync(path.join(directory, ".queuemaxxing.lock"), JSON.stringify({
+    pid: 2_147_483_647,
+    token: "stale",
+    createdAt: 0,
+  }));
+
+  const store = new QueueStore({ dataDir: directory }).open();
+  store.createQueue("recovered");
+  store.close();
+  assert.equal(fs.existsSync(path.join(directory, ".queuemaxxing.lock")), false);
 });
 
 test("recovery discards a torn final write but rejects corruption", () => {

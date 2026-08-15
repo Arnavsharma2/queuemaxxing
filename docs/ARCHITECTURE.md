@@ -22,7 +22,7 @@ Acknowledged messages remain in the history even though they are removed from th
 
 One Node process owns the log. HTTP requests may arrive concurrently, but the queue mutation methods do not yield: selection, append, `fsync`, and in-memory application form one critical section. Two claims therefore cannot lease the same message.
 
-This is concurrency within one server, not horizontal scaling. Starting two copies against the same directory is unsupported. A production single-node version should enforce that with a process lock. A distributed version would need replication and leader election rather than shared-file access.
+This is concurrency within one server, not horizontal scaling. An exclusive PID/token lock prevents two live copies from opening the same directory, while a stale lock left by a crashed process is reclaimed during restart. A distributed version would need replication and leader election rather than shared-file access.
 
 ## Ordering
 

@@ -9,6 +9,7 @@ const DEFAULT_VISIBILITY_TIMEOUT_MS = 30_000;
 const MAX_VISIBILITY_TIMEOUT_MS = 12 * 60 * 60 * 1_000;
 const MAX_DELAY_MS = 14 * 24 * 60 * 60 * 1_000;
 const MAX_BATCH_SIZE = 100;
+const LOCK_FILE = ".queuemaxxing.lock";
 
 function checksum(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
@@ -46,27 +47,51 @@ export class QueueStore {
     if (!dataDir) throw new Error("dataDir is required");
     this.dataDir = path.resolve(dataDir);
     this.logPath = path.join(this.dataDir, "events.ndjson");
+    this.lockPath = path.join(this.dataDir, LOCK_FILE);
     this.clock = clock;
     this.queues = new Map();
     this.idempotency = new Map();
     this.sequence = 0;
     this.eventSequence = 0;
     this.fd = undefined;
+    this.lockToken = undefined;
   }
 
   open() {
     fs.mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
-    this.#recover();
-    this.fd = fs.openSync(this.logPath, "a", 0o600);
+    this.#acquireLock();
+    try {
+      this.#recover();
+      this.fd = fs.openSync(this.logPath, "a", 0o600);
+    } catch (error) {
+      this.#releaseLock();
+      throw error;
+    }
     return this;
   }
 
   close() {
+    let closeError;
     if (this.fd !== undefined) {
-      fs.fsyncSync(this.fd);
-      fs.closeSync(this.fd);
+      const fd = this.fd;
       this.fd = undefined;
+      try {
+        fs.fsyncSync(fd);
+      } catch (error) {
+        closeError = error;
+      }
+      try {
+        fs.closeSync(fd);
+      } catch (error) {
+        closeError ??= error;
+      }
     }
+    try {
+      this.#releaseLock();
+    } catch (error) {
+      closeError ??= error;
+    }
+    if (closeError) throw closeError;
   }
 
   createQueue(name, options = {}) {
@@ -390,6 +415,74 @@ export class QueueStore {
       else stats.available += 1;
     }
     return stats;
+  }
+
+  #acquireLock() {
+    const token = crypto.randomUUID();
+    const owner = JSON.stringify({ pid: process.pid, token, createdAt: Date.now() });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let lockFd;
+      try {
+        lockFd = fs.openSync(this.lockPath, "wx", 0o600);
+      } catch (error) {
+        if (error.code !== "EEXIST") throw error;
+
+        let existing;
+        try {
+          existing = JSON.parse(fs.readFileSync(this.lockPath, "utf8"));
+        } catch {
+          throw new Error(`Queue data directory '${this.dataDir}' has an unreadable lock file`);
+        }
+        if (Number.isSafeInteger(existing.pid) && this.#processExists(existing.pid)) {
+          throw new Error(`Queue data directory '${this.dataDir}' is already in use by process ${existing.pid}`);
+        }
+        try {
+          fs.unlinkSync(this.lockPath);
+        } catch (unlinkError) {
+          if (unlinkError.code !== "ENOENT") throw unlinkError;
+        }
+        continue;
+      }
+
+      try {
+        fs.writeFileSync(lockFd, owner, "utf8");
+        fs.fsyncSync(lockFd);
+      } catch (error) {
+        try {
+          fs.unlinkSync(this.lockPath);
+        } catch (unlinkError) {
+          if (unlinkError.code !== "ENOENT") error.cause = unlinkError;
+        }
+        throw error;
+      } finally {
+        fs.closeSync(lockFd);
+      }
+      this.lockToken = token;
+      return;
+    }
+    throw new Error(`Unable to acquire the lock for queue data directory '${this.dataDir}'`);
+  }
+
+  #releaseLock() {
+    if (this.lockToken === undefined) return;
+    try {
+      const existing = JSON.parse(fs.readFileSync(this.lockPath, "utf8"));
+      if (existing.token === this.lockToken) fs.unlinkSync(this.lockPath);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    } finally {
+      this.lockToken = undefined;
+    }
+  }
+
+  #processExists(pid) {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return error.code !== "ESRCH";
+    }
   }
 
   #recover() {
