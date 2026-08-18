@@ -508,7 +508,19 @@ export class QueueStore {
       if (typeof record.body !== "string" || record.checksum !== checksum(record.body)) {
         throw new Error(`Event log checksum mismatch at byte ${validBytes}`);
       }
-      this.#apply(JSON.parse(record.body));
+      let event;
+      try {
+        event = JSON.parse(record.body);
+      } catch (error) {
+        throw new Error(`Corrupt event body at byte ${validBytes}: ${error.message}`);
+      }
+      const expectedSequence = this.eventSequence + 1;
+      if (!Number.isSafeInteger(event.eventSequence) || event.eventSequence !== expectedSequence) {
+        throw new Error(
+          `Event log sequence mismatch at byte ${validBytes}: expected ${expectedSequence}, received ${event.eventSequence}`,
+        );
+      }
+      this.#apply(event);
       validBytes = cursor;
     }
     if (validBytes !== data.length) {

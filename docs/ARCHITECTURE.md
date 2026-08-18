@@ -14,7 +14,7 @@ For each mutation the server:
 
 The order matters. A client does not receive a success response for a message that only exists in memory.
 
-Startup verifies and applies each event in order. A crash can leave the last record incomplete, so recovery truncates an incomplete tail. A complete record with a bad checksum is treated differently: startup fails because silently skipping corruption would make the queue state untrustworthy.
+Startup verifies the checksum and contiguous sequence number of every event before applying it. A crash can leave the last record incomplete, so recovery truncates an incomplete tail. A complete record with a bad checksum, invalid body, gap, duplicate, or reorder is treated differently: startup fails because silently accepting corruption would make the queue state untrustworthy.
 
 Acknowledged messages remain in the history even though they are removed from the live in-memory view. This keeps recovery simple, but the log will grow. I would add segmented logs, snapshots, and compaction before using this for a long-running high-volume workload.
 

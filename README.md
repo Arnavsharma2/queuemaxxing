@@ -71,6 +71,18 @@ curl -sS http://localhost:8080/v1/queues/jobs/messages/MESSAGE_ID/ack \
 
 The full API is documented in [docs/API.md](docs/API.md) and [openapi.yaml](openapi.yaml).
 
+## Requirement map
+
+| Prompt requirement | Implementation | Executable evidence |
+| --- | --- | --- |
+| FIFO or LIFO | Monotonic enqueue sequence, sorted in the configured direction | Ordering matrix in `test/queue-store.test.js` |
+| Priority | Priority is the primary key; FIFO/LIFO breaks ties | Mixed-priority ordering tests |
+| Delay | Queue default with a per-message override; unavailable messages never block ready work | Composed delay + priority + LIFO test |
+| Durable across restarts | Checksummed, sequenced append-only log; every accepted mutation is `fsync`ed | Clean-restart, torn-write, corruption, and `SIGKILL` recovery tests |
+| No database or queue | Storage is implemented with Node's file APIs in `src/queue-store.js` | Zero runtime dependencies |
+| Concurrency | A synchronous commit section atomically selects, persists, and applies claims | Concurrent HTTP producer/consumer test verifies 60 unique deliveries |
+| Simple application | Browser console and CLI demo use the same public HTTP API | `npm start`, then `npm run demo` |
+
 ## Example client
 
 The page served at `/` is a client of the public HTTP API. It can create queues, publish immediate or delayed messages, claim work, acknowledge it, and release it for retry. There is also a command-line example:
@@ -95,6 +107,16 @@ npm run test:coverage
 ```
 
 The tests cover all four ordering modes, delayed availability, visibility-timeout replay, stale receipts, explicit retry, lease extension, idempotent publishing, restart recovery, torn writes, corruption detection, concurrent claims, and the HTTP client flow.
+
+Two tests target the highest-risk claims directly: one runs concurrent producers and consumers through the HTTP boundary, and another kills a writer with `SIGKILL` before reopening the same data directory.
+
+For a reproducible local performance sample:
+
+```bash
+npm run benchmark -- 1000
+```
+
+The benchmark reports publish, claim, acknowledgement, and restart-replay timings. It intentionally keeps durability enabled, so each publish and acknowledgement includes an `fsync`.
 
 ## Design questions
 

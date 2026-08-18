@@ -11,6 +11,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "demo": "node bin/demo.js",
+    "benchmark": "node bin/benchmark.js",
     "test": "node --test",
     "test:coverage": "node --test --experimental-test-coverage"
   },

@@ -49,6 +49,39 @@ test("HTTP lifecycle creates, publishes, claims, and acknowledges", async () => 
   assert.equal(result.body.acknowledged, true);
 });
 
+test("concurrent HTTP producers and consumers never duplicate a delivery", async () => {
+  const messageCount = 60;
+  let result = await request("/v1/queues", "POST", {
+    name: "http-concurrency",
+    discipline: "fifo",
+    priority: true,
+  });
+  assert.equal(result.response.status, 201);
+
+  const published = await Promise.all(Array.from({ length: messageCount }, (_, index) =>
+    request("/v1/queues/http-concurrency/messages", "POST", {
+      payload: { index },
+      priority: index % 5,
+    })));
+  assert.ok(published.every(({ response }) => response.status === 201));
+
+  const workerResults = await Promise.all(Array.from({ length: 12 }, () =>
+    request("/v1/queues/http-concurrency/claims", "POST", { limit: 5 })));
+  const claimed = workerResults.flatMap(({ body }) => body.messages);
+  const ids = claimed.map((message) => message.id);
+  assert.equal(claimed.length, messageCount);
+  assert.equal(new Set(ids).size, messageCount);
+
+  const acknowledgements = await Promise.all(claimed.map((message) =>
+    request(`/v1/queues/http-concurrency/messages/${message.id}/ack`, "POST", {
+      receipt: message.receipt,
+    })));
+  assert.ok(acknowledgements.every(({ response }) => response.status === 200));
+
+  result = await request("/v1/queues/http-concurrency");
+  assert.deepEqual(result.body.queue.stats, { total: 0, available: 0, delayed: 0, inFlight: 0 });
+});
+
 test("HTTP errors are structured and include request IDs", async () => {
   const result = await request("/v1/queues/missing/claims", "POST", {});
   assert.equal(result.response.status, 404);

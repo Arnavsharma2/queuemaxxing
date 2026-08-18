@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fork } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
 import { QueueStore } from "../src/queue-store.js";
@@ -122,6 +124,30 @@ test("durable log restores queues, delayed data, claims, and idempotency", () =>
   recovered.close();
 });
 
+test("fsynced messages survive an ungraceful process crash", { skip: process.platform === "win32" }, async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "queuemaxxing-crash-"));
+  directories.push(directory);
+  const fixture = fileURLToPath(new URL("../test-support/crash-writer.js", import.meta.url));
+  const child = fork(fixture, [], {
+    env: { ...process.env, DATA_DIR: directory },
+    stdio: ["ignore", "ignore", "inherit", "ipc"],
+  });
+
+  await new Promise((resolve, reject) => {
+    child.once("message", resolve);
+    child.once("error", reject);
+    child.once("exit", (code, signal) => reject(new Error(`crash writer exited early: code=${code} signal=${signal}`)));
+  });
+  child.kill("SIGKILL");
+  await new Promise((resolve) => child.once("exit", resolve));
+
+  const recovered = new QueueStore({ dataDir: directory }).open();
+  const message = recovered.claim("crash-test").at(0);
+  assert.deepEqual(message.payload, { durable: true });
+  assert.equal(message.attempts, 1);
+  recovered.close();
+});
+
 test("only one store process can own a data directory at a time", () => {
   const { directory, store } = storeAt();
   store.createQueue("exclusive");
@@ -162,6 +188,19 @@ test("recovery discards a torn final write but rejects corruption", () => {
   recovered.close();
   fs.appendFileSync(logPath, '{"body":"{}","checksum":"wrong"}\n');
   assert.throws(() => new QueueStore({ dataDir: directory }).open(), /checksum mismatch/);
+});
+
+test("recovery rejects deleted or reordered event records", () => {
+  const { directory, store } = storeAt();
+  store.createQueue("sequence");
+  store.enqueue("sequence", { payload: "first" });
+  store.enqueue("sequence", { payload: "second" });
+  store.close();
+
+  const logPath = path.join(directory, "events.ndjson");
+  const records = fs.readFileSync(logPath, "utf8").trimEnd().split("\n");
+  fs.writeFileSync(logPath, `${[records[0], records[2]].join("\n")}\n`);
+  assert.throws(() => new QueueStore({ dataDir: directory }).open(), /sequence mismatch/);
 });
 
 test("one message is never delivered twice across simultaneous claims", async () => {

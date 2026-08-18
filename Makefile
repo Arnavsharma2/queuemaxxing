@@ -1,4 +1,4 @@
-.PHONY: run test coverage demo docker
+.PHONY: run test coverage demo benchmark docker
 
 run:
 	node src/server.js
@@ -11,6 +11,9 @@ coverage:
 
 demo:
 	node bin/demo.js
+
+benchmark:
+	node bin/benchmark.js
 
 docker:
 	docker compose up --build
